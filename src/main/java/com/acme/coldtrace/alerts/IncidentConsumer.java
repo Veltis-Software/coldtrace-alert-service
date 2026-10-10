@@ -15,10 +15,15 @@ import org.springframework.transaction.annotation.Transactional;
 public class IncidentConsumer {
   private final JdbcTemplate jdbc;
   private final ObjectMapper json;
+  private final com.acme.coldtrace.alerts.application.AlertUpdates updates;
 
-  public IncidentConsumer(JdbcTemplate jdbc, ObjectMapper json) {
+  public IncidentConsumer(
+      JdbcTemplate jdbc,
+      ObjectMapper json,
+      com.acme.coldtrace.alerts.application.AlertUpdates updates) {
     this.jdbc = jdbc;
     this.json = json;
+    this.updates = updates;
   }
 
   @Transactional
@@ -47,13 +52,24 @@ public class IncidentConsumer {
             Timestamp.from(Instant.now()));
     if (fresh == 0) return;
     if (type.equals("source.gap") && gap.equals("CLOSED")) {
-      jdbc.update(
-          "UPDATE incidents SET status='RESOLVED',resolved_at=? WHERE organization_id=? AND"
-              + " asset_id=? AND type='NO_DATA' AND status='OPEN' AND detected_at<=?",
-          Timestamp.from(occurred),
-          org,
-          asset,
-          Timestamp.from(occurred));
+      var active =
+          jdbc.queryForList(
+              "SELECT id,assigned_to_user_id FROM incidents WHERE organization_id=? AND asset_id=?"
+                  + " AND type='NO_DATA' AND status IN ('OPEN','ACKED') AND detected_at<=? FOR"
+                  + " UPDATE",
+              org,
+              asset,
+              Timestamp.from(occurred));
+      for (var incident : active) {
+        long id = ((Number) incident.get("id")).longValue();
+        var assignee = (Number) incident.get("assigned_to_user_id");
+        jdbc.update(
+            "UPDATE incidents SET status='RESOLVED',resolved_at=? WHERE id=?",
+            Timestamp.from(occurred),
+            id);
+        updates.append(
+            id, org, asset, "RESOLVED", assignee == null ? null : assignee.longValue(), occurred);
+      }
       return;
     }
     var holder = new GeneratedKeyHolder();
@@ -80,6 +96,15 @@ public class IncidentConsumer {
         },
         holder);
     long id = Objects.requireNonNull(holder.getKey()).longValue();
+    try {
+      jdbc.update(
+          "UPDATE incidents SET context_payload=? WHERE id=?",
+          json.writeValueAsString(payload),
+          id);
+    } catch (Exception failure) {
+      throw new IllegalStateException("Cannot persist context", failure);
+    }
+    updates.append(id, org, asset, "OPEN", null, Instant.now());
     // A durable in-app notification is verifiable; no email/SMS delivery is claimed.
     jdbc.update(
         "INSERT INTO notifications(incident_id,organization_id,channel,status,deep_link,created_at)"
@@ -104,6 +129,8 @@ public class IncidentConsumer {
                 asset,
                 "severity",
                 severity,
+                "detectedAt",
+                occurred.toString(),
                 "type",
                 type.equals("source.gap") ? "NO_DATA" : "THRESHOLD_BREACHED"));
     try {
