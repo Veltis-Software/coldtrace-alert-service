@@ -23,8 +23,14 @@ class IncidentConsumerTest {
 
   @BeforeEach
   void clean() {
-    for (String table : List.of("notifications", "outbox_events", "incidents", "processed_events"))
-      jdbc.update("DELETE FROM " + table);
+    for (String table :
+        List.of(
+            "corrective_actions",
+            "alert_updates",
+            "notifications",
+            "outbox_events",
+            "incidents",
+            "processed_events")) jdbc.update("DELETE FROM " + table);
   }
 
   private com.fasterxml.jackson.databind.JsonNode event(String type, Map<String, Object> payload) {
@@ -60,7 +66,9 @@ class IncidentConsumerTest {
   void gapClosedResolvesOnlyTheSameOrganizationsAsset() {
     consumer.accept(event("source.gap", Map.of("assetId", 1, "state", "OPENED")));
     consumer.accept(event("source.gap", Map.of("assetId", 2, "state", "OPENED")));
+    jdbc.update("UPDATE incidents SET status='ACKED',assigned_to_user_id=10 WHERE asset_id=1");
     consumer.accept(event("source.gap", Map.of("assetId", 1, "state", "CLOSED")));
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM alert_updates", Long.class)).isEqualTo(3);
     assertThat(jdbc.queryForObject("SELECT status FROM incidents WHERE asset_id=1", String.class))
         .isEqualTo("RESOLVED");
     assertThat(jdbc.queryForObject("SELECT status FROM incidents WHERE asset_id=2", String.class))
