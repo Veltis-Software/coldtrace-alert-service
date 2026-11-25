@@ -53,9 +53,14 @@ public class AlertController {
   public List<AlertService.Detail> traceability(
       @RequestParam java.time.Instant from,
       @RequestParam java.time.Instant to,
+      @RequestParam(required = false) Long assetId,
+      @RequestParam(required = false) String state,
+      @RequestParam(required = false) String severity,
+      @RequestParam(required = false) Long assigneeUserId,
       @RequestHeader(value = "Authorization", required = false) String bearer) {
     var session = identity.session(bearer);
-    return service.traceability(session, identity.members(bearer, session), from, to);
+    var filter = new AlertService.HistoryFilter(assetId, state, severity, assigneeUserId);
+    return service.traceability(session, identity.members(bearer, session), from, to, filter);
   }
 
   @PostMapping("/api/v1/alerts/{id}/acknowledgement")

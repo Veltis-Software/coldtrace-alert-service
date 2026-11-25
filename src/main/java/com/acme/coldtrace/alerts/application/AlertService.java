@@ -59,24 +59,44 @@ public class AlertService {
         org);
   }
 
+  public record HistoryFilter(Long assetId, String state, String severity, Long assigneeUserId) {}
+
   public List<Detail> traceability(
       IdentitySession session, List<UserRef> members, Instant from, Instant to) {
-    if (from == null
-        || to == null
-        || !from.isBefore(to)
-        || Duration.between(from, to).toDays() > 90)
+    return traceability(session, members, from, to, new HistoryFilter(null, null, null, null));
+  }
+
+  public List<Detail> traceability(
+      IdentitySession session, List<UserRef> members, Instant from, Instant to,
+      HistoryFilter filter) {
+    if (from == null || to == null || !from.isBefore(to)
+        || Duration.between(from, to).compareTo(Duration.ofDays(90)) > 0)
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid report period");
-    return jdbc
-        .queryForList(
-            "SELECT id FROM incidents WHERE organization_id=? AND detected_at>=? AND detected_at<?"
-                + " ORDER BY detected_at,id",
-            Long.class,
-            session.organizationId(),
-            Timestamp.from(from),
-            Timestamp.from(to))
+    var sql = new StringBuilder(
+        "SELECT id FROM incidents WHERE organization_id=? AND detected_at>=? AND detected_at<?");
+    var params = new ArrayList<Object>(List.of(
+        session.organizationId(), Timestamp.from(from), Timestamp.from(to)));
+    appendFilter(sql, params, "asset_id", filter.assetId());
+    appendFilter(sql, params, "LOWER(status)", normalized(filter.state()));
+    appendFilter(sql, params, "LOWER(severity)", normalized(filter.severity()));
+    appendFilter(sql, params, "assigned_to_user_id", filter.assigneeUserId());
+    sql.append(" ORDER BY detected_at,id");
+    return jdbc.queryForList(sql.toString(), Long.class, params.toArray())
         .stream()
         .map(id -> detail(id, session, members))
         .toList();
+  }
+
+  private static String normalized(String value) {
+    return value == null || value.isBlank() ? null : value.strip().toLowerCase(Locale.ROOT);
+  }
+
+  private static void appendFilter(
+      StringBuilder sql, List<Object> params, String column, Object value) {
+    if (value != null) {
+      sql.append(" AND ").append(column).append("=?");
+      params.add(value);
+    }
   }
 
   public record AssetRef(long assetId, String name, String locationName) {}
@@ -99,7 +119,9 @@ public class AlertService {
       UserRef assignee,
       UserRef suggestedAssignee,
       List<String> allowedActions,
-      List<Map<String, Object>> correctiveActions) {}
+      List<Map<String, Object>> correctiveActions,
+      Long resolvedByUserId,
+      Instant resolvedAt) {}
 
   public record Result(
       long id,
@@ -200,7 +222,9 @@ public class AlertService {
             "SELECT id,author_user_id,description,created_at FROM corrective_actions WHERE"
                 + " incident_id=? AND organization_id=? ORDER BY id",
             id,
-            session.organizationId()));
+            session.organizationId()),
+        row.get("resolved_by_user_id") instanceof Number resolver ? resolver.longValue() : null,
+        instant(row.get("resolved_at")));
   }
 
   public static void authorize(IdentitySession session) {
@@ -292,7 +316,8 @@ public class AlertService {
     action(id, session, summary);
     var now = clock.instant();
     jdbc.update(
-        "UPDATE incidents SET status='RESOLVED',resolved_at=? WHERE id=?", Timestamp.from(now), id);
+        "UPDATE incidents SET status='RESOLVED',resolved_at=?,resolved_by_user_id=? WHERE id=?",
+        Timestamp.from(now), session.userId(), id);
     updates.append(
         id,
         session.organizationId(),
