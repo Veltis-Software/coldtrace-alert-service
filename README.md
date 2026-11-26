@@ -7,12 +7,9 @@ matching organization's asset; an older close cannot resolve a newer gap.
 
 ## API and notifications
 
-`GET /api/v1/alerts` and `GET /api/v1/alerts/{id}` require a bearer token; IAM
-resolves the organization and queries are isolated by it. The detail contains
-durable `IN_APP` notifications with status `AVAILABLE` and `/alerts/{id}` links.
-This increment does not send email/SMS or implement acknowledgement/assignment,
-undo or SSE. `incident.opened` is persisted in the service outbox; its relay is
-not yet implemented.
+Authenticated incident lists, detail and in-app notifications are scoped to the IAM session organization. Detail includes asset context, measured values, effective ranges, assignee and corrective actions. `POST /api/v1/alerts/{id}/acknowledgement` requires `alerts:update` and a real organization member; the author can undo with DELETE for ten seconds. Incident action and resolution endpoints preserve authorship and timestamps.
+
+`GET /api/v1/alerts/stream` provides durable `alert.updated` SSE events, organization-scoped cursor replay and 25-second keepalives. Bearer tokens remain in headers. `incident.opened` is committed in the outbox and relayed through the explicitly enabled local Pub/Sub emulator. Notifications use the durable IN_APP channel; email/SMS is outside this increment.
 
 ## Configuration
 
@@ -33,18 +30,17 @@ failure, gap closure isolation, invalid envelopes and delayed close events.
 
 ## Build and test
 
-Requires Java 21 and Maven. Install the shared library from tag
-`v0.1.0-sprint1` (`08ab5ee5321e3d7e5e4ec0b3c454a5f5da9bfcc3`) first:
+Requires Java 21 and Maven. Install the common library from the infrastructure repository first:
 
 ```sh
-mvn -B -f ../coldtrace-shared/pom.xml install
+mvn -B -f ../coldtrace-infrastructure/libraries/coldtrace-shared/pom.xml install
 mvn -B verify
 ```
 
 Build the standalone image with the sibling library as a named build context:
 
 ```sh
-docker build --build-context shared=../coldtrace-shared -t coldtrace-alert-service:dev .
+docker build --build-context shared=../coldtrace-infrastructure/libraries/coldtrace-shared -t coldtrace-alert-service:dev .
 ```
 
 The CI workflow installs the pinned shared source, runs tests, builds the image
